@@ -1,21 +1,23 @@
-use std::str::FromStr;
+mod book_repository;
 
+use std::str::FromStr;
 use rocket::http::Status;
 use rocket::response::status;
-use rocket::serde::Serialize;
+use rocket::serde::{json};
 use rocket::tokio::time::{sleep, Duration};
-use rocket::serde::{Deserialize, json::Json};
+use rocket::serde::{json::Json};
 use rocket::{get, post, routes};
 use rocket::http::Method; // 1.
 
 use rocket::State;
-use sqlx::prelude::FromRow;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Pool, Sqlite, SqlitePool};
 
 use rocket_cors::{
     AllowedHeaders, AllowedOrigins, Cors, CorsOptions // 3.
 };
+
+use crate::book_repository::Book;
 
 #[get("/delay/<seconds>")]
 async fn delay(seconds: u64) -> String {
@@ -28,36 +30,21 @@ fn index() -> &'static str {
     "Hello, world!"
 }
 
-#[derive(Serialize, Deserialize, FromRow)]
-#[serde(crate = "rocket::serde")]
-struct Book {
-    title: String,
-    author: String,
-}
-
 #[post("/book", data = "<book>")]
-async fn put_book<'a>(book: Json<Book>, pool: &State<Pool<Sqlite>>) -> Status {
-    println!("<{}> Book from <{}>", book.title, book.author);
+async fn put_book<'a>(book: Json<Book>, pool: &State<Pool<Sqlite>>) -> Result<Json<Book>, status::Custom<String>> {
+    let result = book.insert(pool).await;
 
-    let insert_statement = "
-    INSERT INTO books (title, author) VALUES ($1, $2);
-    ";
-
-    sqlx::query(&insert_statement)
-        .bind(&book.title)
-        .bind(&book.author)
-        .execute(&**pool).await.unwrap();
-
-    Status::Ok
+    match result {
+        Ok(id) => Ok(Json(Book{id: Some(id), ..book.into_inner()})),
+        Err(e) => Err(status::Custom(Status::InternalServerError, format!("DB error: {}", e))),
+    }
 }
 
 #[get("/book")]
 async fn get_book(pool: &State<Pool<Sqlite>>) -> Result<Json<Vec<Book>>, status::Custom<String>> {
-    let keys= sqlx::query_as::<_, Book>("SELECT * FROM books")
-        .fetch_all(&**pool)
-        .await;
+    let all_books = Book::get_all(pool).await;
 
-    match keys {
+    match all_books {
         Ok(r) => Ok(Json(r)),
         Err(e) => Err(status::Custom(Status::InternalServerError, format!("DB error: {}", e))),
     }
@@ -87,12 +74,19 @@ fn make_cors() -> Cors {
 async fn init_db(pool: &Pool<Sqlite>) {
         let qry = 
     "CREATE TABLE IF NOT EXISTS books (
-	id	INTEGER NOT NULL,
-	title	TEXT NOT NULL,
-	author	TEXT NOT NULL,
-	created_on	DATETIME DEFAULT (datetime('now', 'localtime')),
-	PRIMARY KEY(id AUTOINCREMENT)
-);";
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    author TEXT NOT NULL,
+    publishingdate TEXT,
+    purchaseddate TEXT,
+    publisher TEXT,
+    isbn TEXT,
+    price_new TEXT,
+    price_bought TEXT,
+    newused TEXT,
+    pages TEXT,
+    genres TEXT -- Store JSON array as TEXT
+    );";
 
     let res = sqlx::query(&qry).execute(pool).await;
     res.unwrap();
